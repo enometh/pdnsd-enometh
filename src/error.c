@@ -121,6 +121,15 @@ void debug_msg(int c, const char *fmt, ...)
 {
 	va_list va;
 
+	if (global.daemon) {
+		openlog("pdnsd",LOG_PID,LOG_DAEMON);
+		va_start(va,fmt);
+		vsyslog(c,fmt,va);
+		va_end(va);
+		closelog();
+		return;
+	}
+
 	if (!c) {
 		char ts[sizeof "12/31 23:59:59"];
 		time_t tt = time(NULL);
