@@ -1309,6 +1309,32 @@ static dns_msg_t *process_query(unsigned char *data, size_t *rlenp, unsigned *ud
 		res=RC_FORMAT;
 		goto error_reply;
 	}
+
+	{			/* ;madhu 120102 */
+#include <stdlib.h>
+		const char * bplate = "kdialog --yesno";
+		char buf[1028]; int ret;
+		char debugstrbuf[128];
+		dns_queryel_t *qe;
+		for (qe=llist_first(&ql); qe; qe=llist_next(qe)) {
+			rhn2str(qe->query,debugstrbuf,128);
+			snprintf(buf,1028,"%s '\tqc=%s (%u), qt=%s (%u), query=\"%s\"'\n",
+				 bplate,
+				 get_cname(qe->qclass),
+				 qe->qclass,
+				 get_tname(qe->qtype),
+				 qe->qtype,
+				 debugstrbuf);
+			if (WEXITSTATUS((ret=system(buf)))||WIFSIGNALED(ret)) {
+				DEBUG_MSG("REJECTED: ret=%d,exitstatus=%d,signalled=%d,sig=%d\n",
+					  ret, WEXITSTATUS(ret),WIFSIGNALED(ret),
+					  WTERMSIG(ret));
+				//return NULL;
+				goto error_reply;
+			}
+		}
+	}
+
 	if (!(ans=compose_answer(&ql, hdr, rlenp, ednsinfop, udp, rcodep))) {
 		/* An out of memory condition or similar could cause NULL output. Send failure notification */
 		res=RC_SERVFAIL;
