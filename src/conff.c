@@ -169,7 +169,7 @@ int read_config_file(const char *nm, globparm_t *global, llist *servers, int inc
 				*errstr=NULL;
 			goto close_file;
 		}
-		else if (sb.st_uid!=init_uid) {
+		else if (sb.st_uid!=init_uid && init_uid != 0) {
 			/* Note by Paul Rombouts:
 			   Perhaps we should use getpwuid_r() instead of getpwuid(), which is not necessarily thread safe.
 			   As long as getpwuid() is only used by only one thread, it should be OK,
