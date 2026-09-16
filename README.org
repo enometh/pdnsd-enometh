@@ -1,0 +1,22 @@
+* PDNSD-enometh
+
+** <2026-09-16 Wed>
+
+I'm uploading the copy of the pdnsd repo I seem to have acquired from
+git://gitorious.org/pdnsd/pdnsd.git on 2012-08-10 (before
+gitorious.org was shamefully effaced by the gitlab.com capital).
+Today I was unable to find a copy of the pdnsd git history anywhere on
+the web.
+
+The last public release on phys.uu.nl/~rombuts website was
+pdnsd-1.2.9a.par.tar.gz on 2012-03-17.  (This is the version that
+seems to be packaged by arch, gentoo, ubuntu unto this day.)
+
+The repository had seen a few months of development by the original
+author after the 1.2.9a tag on various branches, which takes the
+version upto (unreleased) 1.2.9d. I've also merged these branches onto
+`main', and merged a branch from SAPikachu/pdnsd (2013-01-13) onto and
+added a few old patches I had on this branch.
+
+If the authors have archived the repository elsewhere I'd appreciate a
+note. -- Madhu.
