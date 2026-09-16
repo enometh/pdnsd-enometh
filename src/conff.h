@@ -117,7 +117,7 @@ typedef struct {
 #endif
 	pdnsd_a          ping_a;
 } servparm_t;
-typedef DYNAMIC_ARRAY(servparm_t) *servparm_array;
+
 
 typedef unsigned char *zone_t;
 typedef DYNAMIC_ARRAY(zone_t) *zone_array;
@@ -183,10 +183,11 @@ extern globparm_t global;
 extern cmdlineflags_t cmdline;
 extern servparm_t serv_presets;
 
-extern servparm_array servers;
+extern llist servers;
 
-int read_config_file(const char *nm, globparm_t *global, servparm_array *servers, int includedepth, char **errstr);
+int read_config_file(const char *nm, globparm_t *global, llist *servers, int includedepth, char **errstr);
 int reload_config_file(const char *nm, char **errstr);
+void free_config_data();
 void free_zone(void *ptr);
 void free_rtree(inexnode_t *rtree);
 void free_servparm(servparm_t *serv);

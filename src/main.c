@@ -413,6 +413,7 @@ int main(int argc,char *argv[])
 		}
 	}
 
+	llist_init(&servers);
 	init_cache();
 	{
 		char *errmsg;
@@ -442,8 +443,8 @@ int main(int argc,char *argv[])
 	stat_pipe=global.stat_pipe;
 
 	if (!(global.run_as[0] && global.strict_suid)) {
-		for (i=0; i<DA_NEL(servers); i++) {
-			servparm_t *sp=&DA_INDEX(servers,i);
+		servparm_t *sp;
+		for (sp=llist_first(&servers); sp; sp=llist_next(sp)) {
 			if (sp->uptest==C_EXEC && sp->uptest_usr[0]=='\0') {
 				uid_t uid=getuid();
 				struct passwd *pws=getpwuid(uid);
@@ -482,10 +483,13 @@ int main(int argc,char *argv[])
 			exit(1);
 		}
 	}
-	for (i=0;i<DA_NEL(servers);i++) {
-		if (DA_INDEX(servers,i).uptest==C_PING) {
-			init_ping_socket();
-			break;
+	{
+		servparm_t *sp;
+		for (sp=llist_first(&servers); sp; sp=llist_next(sp)) {
+			if (sp->uptest==C_PING) {
+				init_ping_socket();
+				break;
+			}
 		}
 	}
 
@@ -683,6 +687,9 @@ int main(int argc,char *argv[])
 		}
 	}
 	if(sig) DEBUG_MSG("Signal %i caught.\n",sig);
+	/* By freeing the server configuration data, we should effectively be
+	   stopping threads from initiating new queries to remote servers. */
+	free_config_data();
 	write_disk_cache();
 	destroy_cache();
 	if(sig) log_warn("Caught signal %i. Exiting.",sig);
