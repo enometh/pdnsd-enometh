@@ -204,19 +204,19 @@ int domain_name_match(const unsigned char *ms, const unsigned char *md, int *os,
 unsigned int domain_match(const unsigned char *ms, const unsigned char *md, unsigned int *os, unsigned int *od)
 {
 	unsigned int i,j,k,n,ns=0,nd=0,offs,offd;
-	unsigned char lb,ls[128],ld[128];
+	unsigned char lb,ls[MAXNLB],ld[MAXNLB];
 
 	/* first collect all length bytes */
 	i=0;
 	while((lb=ms[i])) {
-		PDNSD_ASSERT(ns<128, "domain_match: too many name segments");
+		PDNSD_ASSERT(ns<MAXNLB, "domain_match: too many name segments");
 		ls[ns++]=lb;
 		i += ((unsigned)lb)+1;
 	}
 
 	j=0;
 	while((lb=md[j])) {
-		PDNSD_ASSERT(nd<128, "domain_match: too many name segments");
+		PDNSD_ASSERT(nd<MAXNLB, "domain_match: too many name segments");
 		ld[nd++]=lb;
 		j += ((unsigned)lb)+1;
 	}
