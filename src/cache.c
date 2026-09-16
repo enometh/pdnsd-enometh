@@ -43,7 +43,7 @@
 
 
 /* A version identifier to prevent reading incompatible cache files */
-static const char cachverid[] = {'p','d','1','3'};
+static const char cachverid[] = {'p','d','1','4'};
 
 /* CACHE STRUCTURE CHANGES IN PDNSD 1.0.0
  * Prior to version 1.0.0, the cache was managed at domain granularity (all records of a domain were handled as a unit),
@@ -54,7 +54,7 @@ static const char cachverid[] = {'p','d','1','3'};
  * files of older versions and vice versa. In addition, cache files from 1.0.0p5 on are incompatible to those of 1.0.0p1
  * to 1.0.0p4.  Better delete them before upgrading.
  * The "cent" lists common to old versions have vanished; the only access point to the cent's is the hash.
- * However, there are now double linked rrset lists. Thus, rrs can be acces through the hash or through the rrset lists.
+ * However, there are now doubly-linked rrset lists. Thus, rrs can be accessed through the hash or through the rrset lists.
  * The rrset list entries need some additional entries to manage the deletion from rrs lists as well as from the cents.
  *
  * Nearly all cache functions had to be changed significantly or even to be rewritten for that. Expect some beta time
@@ -64,9 +64,10 @@ static const char cachverid[] = {'p','d','1','3'};
  * to have stored its oname any more. There are more pointers however, and in some cases (CNAMES) the memory require-
  * ments for some records may increase. The total should be lower, however.
  *
- * RRSET_L LIST STRUCTURE:
- * The rrset_l rrset list is a simple double-linked list. The oldest entries are at the first positions, the list is sorted
- * by age in descending order. Search is done only on insert.
+ * RRSET LIST STRUCTURE:
+ * The rr_l rrset list is a circular doubly-linked list with a sentinel (i.e. dummy) node.
+ * The oldest entries are at the first positions, the list is sorted by timestamp in ascending order.
+ * Search is done only on insert.
  * The rationale for this form is:
  * - the purging operation needs to be fast (this way, the first records are the oldest and can easily be purged)
  * - the append operation is common and needs to be fast (in normal operation, an appended record was just retrieved
@@ -138,21 +139,29 @@ typedef struct {
 }  __attribute__((packed))
 dom_fttlts_t;
 
+/* Link pairs used for doubly linked lists. */
+typedef struct {
+	struct rr_lent_s *next,
+	                 *prev;
+} linkpair_t;
+
 /*
  * This has two modes: Normally, we have rrset, cent and idx filled in;
  * for negatively cached cents, we have rrset set to NULL and idx set to -1.
  */
 typedef struct rr_lent_s {
-	struct rr_lent_s *next;
-	struct rr_lent_s *prev;
+	linkpair_t       links;
 	rr_set_t         *rrset;
 	dns_cent_t       *cent;
 	int              idx;    /* This is the array index, not the type of the RR-set. */
 } rr_lent_t;
 
-
-static rr_lent_t *rrset_l=NULL;
-static rr_lent_t *rrset_l_tail=NULL;
+/* Maintain a doubly-linked circular list of rr_lent_t nodes, with
+   rr_l acting as a dummy or sentinel node.
+   Never try to access the data fields of the sentinel, only use the links! */
+#define NIL_L ((rr_lent_t *) &rr_l)
+static linkpair_t rr_l= {NIL_L,NIL_L};
+static rr_lent_t *last_nocache= NIL_L;  /* Points to last node with CF_NOCACHE/DF_NOCACHE. */
 
 /*
  * We do not count the hash table sizes here. Those are very small compared
@@ -215,6 +224,7 @@ static short int insert_sort=1;
 /*
  * Prototypes for internal use
  */
+static rr_set_t *copy_rrset(rr_set_t *rrset, size_t *szp  DBGPARAM);
 static void purge_cache(long sz, int lazy);
 static void del_cache_ent(dns_cent_t *cent,dns_hash_loc_t *loc);
 static void remove_rrl(rr_lent_t *le  DBGPARAM);
@@ -637,7 +647,7 @@ static int add_cent_rrset_by_index(dns_cent_t *cent, unsigned int idx, time_t tt
 	}
 
 #if 0
-	if(*rrsetpa) del_rrset(*rrsetpa);
+	if(*rrsetpa) cent->cs -= del_rrset(*rrsetpa);
 #endif
 	*rrsetpa = rrset = cache_malloc(sizeof(rr_set_t));
 	if (!rrset)
@@ -649,6 +659,109 @@ static int add_cent_rrset_by_index(dns_cent_t *cent, unsigned int idx, time_t tt
 	rrset->rrs=NULL;
 	cent->cs += sizeof(rr_set_t);
 	++cent->num_rrs;
+	return 1;
+}
+
+/* Add a copy of an RR set to a cent.
+   idx is the internally used RR-set index, not the RR type!
+*/
+static int add_cent_rrset_copy(dns_cent_t *cent, unsigned int idx, rr_set_t *rrset  DBGPARAM)
+{
+	rr_set_t **rrext, **rrsetpa;
+	size_t rsz;
+
+	/* We may not add an rrset, even a negative one, to a negatively cached domain. */
+	PDNSD_ASSERT(!(cent->flags&DF_NEGATIVE),
+		     "add_cent_rrset_copy: trying to add an RR set to a cent with DF_NEGATIVE flag set.");
+
+	if(!rrset)
+		return 1;
+
+	if(idx < NRRMU)
+		rrsetpa = &cent->rr.rrmu[idx];
+	else {
+		idx -= NRRMU;
+		PDNSD_ASSERT(idx < NRREXT, "add_cent_rrset_copy: rr-set index out of range");
+		rrext = cent->rr.rrext;
+		if(!rrext) {
+			int i;
+			cent->rr.rrext = rrext = cache_malloc(sizeof(rr_set_t*)*NRREXT);
+			if(!rrext)
+				return 0;
+			for(i=0; i<NRREXT; ++i)
+				rrext[i]=NULL;
+			cent->cs += sizeof(rr_set_t*)*NRREXT;
+		}
+		rrsetpa = &rrext[idx];
+	}
+
+#if 0
+	if(*rrsetpa) cent->cs -= del_rrset(*rrsetpa);
+#endif
+	if (!(*rrsetpa = copy_rrset(rrset, &rsz  DBGARG)))
+		return 0;
+	cent->cs += rsz;
+	++cent->num_rrs;
+	return 1;
+}
+
+/* Move an RR set from a dns_cent_t to another.
+   The RR set is removed from the source, not copied like add_cent_rrset_copy() does.
+   idx is the internally used RR-set index, not the RR type!
+*/
+static int add_cent_rrset_move(dns_cent_t *cent, dns_cent_t *dest, unsigned int idx  DBGPARAM)
+{
+	rr_set_t **rrext, **rrsetpa_src, **rrsetpa_dst, *rrset;
+	rr_bucket_t *rr;
+	size_t rsz;
+
+	/* We may not add an rrset, even a negative one, to a negatively cached domain. */
+	PDNSD_ASSERT(!(dest->flags&DF_NEGATIVE),
+		     "add_cent_rrset_move: trying to move an RR set to a cent with DF_NEGATIVE flag set.");
+
+	if(idx < NRRMU) {
+		rrsetpa_src = &cent->rr.rrmu[idx];
+		if(!(rrset= *rrsetpa_src))
+			return 1;
+		rrsetpa_dst = &dest->rr.rrmu[idx];
+	}
+	else {
+		idx -= NRRMU;
+		PDNSD_ASSERT(idx < NRREXT, "add_cent_rrset_move: rr-set index out of range");
+		if(!(rrext= cent->rr.rrext))
+			return 1;
+		rrsetpa_src = &rrext[idx];
+		if(!(rrset= *rrsetpa_src))
+			return 1;
+
+		rrext = dest->rr.rrext;
+		if(!rrext) {
+			int i;
+			dest->rr.rrext = rrext = cache_malloc(sizeof(rr_set_t*)*NRREXT);
+			if(!rrext)
+				return 0;
+			for(i=0; i<NRREXT; ++i)
+				rrext[i]=NULL;
+			dest->cs += sizeof(rr_set_t*)*NRREXT;
+		}
+		rrsetpa_dst = &rrext[idx];
+	}
+
+	/* Compute the size of the RR set. */
+	rsz=sizeof(rr_set_t);
+	for(rr=rrset->rrs; rr; rr=rr->next)
+		rsz += sizeof(rr_bucket_t)+rr->rdlen;
+
+#if 0
+	if(*rrsetpa_dst) dest->cs -= del_rrset(*rrsetpa_dst);
+#endif
+	*rrsetpa_dst = rrset;
+	dest->cs += rsz;
+	++dest->num_rrs;
+
+	*rrsetpa_src = NULL;
+	cent->cs -= rsz;
+	--cent->num_rrs;
 	return 1;
 }
 
@@ -752,9 +865,9 @@ int add_cent_rr(dns_cent_t *cent, int type, time_t ttl, time_t ts, unsigned flag
 }
 
 /* Free a complete rrset including all memory. Returns the size of the memory freed */
-int del_rrset(rr_set_t *rrs  DBGPARAM)
+unsigned int del_rrset(rr_set_t *rrs  DBGPARAM)
 {
-	int rv=sizeof(rr_set_t);
+	unsigned int rv=sizeof(rr_set_t);
 	rr_bucket_t *rrb,*rrn;
 
 	if(rrs->lent) remove_rrl(rrs->lent  DBGARG);
@@ -773,9 +886,9 @@ int del_rrset(rr_set_t *rrs  DBGPARAM)
 /* Remove a complete rrset from a cent, freeing the memory.
    The second argument should be an RR-set array index, not an RR type!
    Returns the size of the memory freed */
-static int del_cent_rrset_by_index(dns_cent_t *cent, int i  DBGPARAM)
+static unsigned int del_cent_rrset_by_index(dns_cent_t *cent, int i  DBGPARAM)
 {
-	int rv=0;
+	unsigned int rv=0;
 	rr_set_t **rrspa = RRARR_INDEX_PA_TESTEXT(cent,i);
 
 	if(rrspa) {
@@ -792,7 +905,7 @@ static int del_cent_rrset_by_index(dns_cent_t *cent, int i  DBGPARAM)
 }
 
 #if 0
-static int del_cent_rrset_by_type(dns_cent_t *cent, int type  DBGPARAM)
+static unsigned int del_cent_rrset_by_type(dns_cent_t *cent, int type  DBGPARAM)
 {
 	return del_cent_rrset_by_index(cent, rrlkuptab[type-T_MIN]  DBGARG);
 }
@@ -882,7 +995,7 @@ inline static time_t get_rrlent_ts(rr_lent_t *le)
 	return (le->rrset)?(le->rrset->ts):(le->cent->neg.ts);
 }
 
-/* insert a rrset into the rr_l list. This modifies the rr_set_t if rrs is not NULL!
+/* Insert a rrset into the rr_l list. This modifies the rr_set_t if rrs is not NULL!
  * The rrset address needs to be constant afterwards.
  * idx is the internally used RR-set index, not the RR type!
  * Call with locks applied. */
@@ -900,45 +1013,47 @@ static int insert_rrl(rr_set_t *rrs, dns_cent_t *cent, int idx)
 	ne->rrset=rrs;
 	ne->cent=cent;
 	ne->idx=idx;
-	ne->next=NULL;
-	ne->prev=NULL;
+	ne->links.next=NULL;
+	ne->links.prev=NULL;
 
 	if(insert_sort) {
-		/* Since the append at the and is a very common case (and we want this case to be fast), we search back-to-forth.
-		 * Since rr_l is a list and we don't really have fast access to all elements, we do not perform an advanced algorithm
-		 * like binary search.*/
+		rr_lent_t *last;
+		int nocache;
+		/* Since the append at the and is a very common case (and we want this case to be fast),
+		   we search back-to-front.  Since rr_l is a list and we don't really have fast access
+		   to all elements, we do not perform an advanced algorithm like binary search.
+		   The rr_l list actually has two parts: all the nodes with [CD]F_NOCACHE are in
+		   front of the other nodes. This is done because we want the nodes with [CD]F_NOCACHE
+		   to be purged before the others. */
 		ts=get_rrlent_ts(ne);
-		le=rrset_l_tail;
-		while (le) {
-			if (ts>=get_rrlent_ts(le)) goto found;
-			le=le->prev;
+		if((rrs && (rrs->flags&CF_NOCACHE)) || (cent->flags&DF_NOCACHE)) {
+			nocache=1;
+			le=last_nocache;
+			last=NIL_L;
 		}
-		/* not found, so it needs to be inserted at the start of the list. */
-		ne->next=rrset_l;
-		if (rrset_l)
-			rrset_l->prev=ne;
-		else
-			rrset_l_tail=ne;
-		rrset_l=ne;
-		goto finish;
-	found:
-		ne->next=le->next;
-		ne->prev=le;
-		if (le->next)
-			le->next->prev=ne;
-		else
-			rrset_l_tail=ne;
-		le->next=ne;
-	finish:;
+		else {
+			nocache=0;
+			le=rr_l.prev;
+			last=last_nocache;
+		}
+		while (le!=last && ts<get_rrlent_ts(le))
+			le=le->links.prev;
+
+		/* Insert the new node right after the position indicated by le, which points
+		   to the sentinel or a proper list node. */
+		ne->links.next=le->links.next;
+		ne->links.prev=le;
+		le->links.next->links.prev=ne;
+		le->links.next=ne;
+		if(nocache && le == last_nocache)
+			last_nocache=ne;
 	}
 	else {
 		/* simply append at the end, sorting will be done later with a more efficient algorithm. */
-		ne->prev=rrset_l_tail;
-		if(rrset_l_tail)
-			rrset_l_tail->next=ne;
-		else
-			rrset_l=ne;
-		rrset_l_tail=ne;
+		ne->links.next=NIL_L;
+		ne->links.prev=rr_l.prev;
+		rr_l.prev->links.next=ne;
+		rr_l.prev=ne;
 	}
 
 	if (rrs)
@@ -949,23 +1064,19 @@ static int insert_rrl(rr_set_t *rrs, dns_cent_t *cent, int idx)
 	return 1;
 }
 
-/* Remove a rr from the rr_l list. Call with locks applied. */
+/* Remove a rr from the rr_l list. Call with locks applied.
+   Never use this to remove the sentinel node! */
 static void remove_rrl(rr_lent_t *le  DBGPARAM)
 {
-	rr_lent_t *next=le->next,*prev=le->prev;
-	if (next)
-		next->prev=prev;
-	else
-		rrset_l_tail=prev;
-	if (prev)
-		prev->next=next;
-	else
-		rrset_l=next;
+	rr_lent_t *next=le->links.next, *prev=le->links.prev;
+	next->links.prev=prev;
+	prev->links.next=next;
+	if(le == last_nocache) last_nocache=prev;
 	cache_free(le);
 }
 
 
-/* Merge two sorted rr_l lists to make a larger sorted list.
+/* Merge two sorted (NULL-terminated) rr_l lists to make a larger sorted list.
    The lists are sorted according to increasing time-stamp.
    The back links are ignored, these must be fixed using a separate pass.
 */
@@ -982,7 +1093,7 @@ static rr_lent_t *listmerge(rr_lent_t *p, rr_lent_t *q)
 		for(;;) {
 			if(get_rrlent_ts(p) <= get_rrlent_ts(q)) {
 				*s= p;
-				s= &p->next;
+				s= &p->links.next;
 				p= *s;
 				if(!p) {
 					*s= q;
@@ -991,7 +1102,7 @@ static rr_lent_t *listmerge(rr_lent_t *p, rr_lent_t *q)
 			}
 			else { /* get_rrlent_ts(p) > get_rrlent_ts(q) */
 				*s= q;
-				s= &q->next;
+				s= &q->links.next;
 				q= *s;
 				if(!q) {
 					*s= p;
@@ -1012,18 +1123,20 @@ static rr_lent_t *listmerge(rr_lent_t *p, rr_lent_t *q)
 static void sort_rrl()
 {
 	/* Do nothing unless the list has length >= 2. */
-	if(rrset_l && rrset_l->next) {
+	if(rr_l.next!=NIL_L && rr_l.next->links.next!=NIL_L) {
 		/* First sort the list ignoring the back links, these will be fixed later. */
 #               define NTMPSORT 32
 		/* Because we use an array of fixed length, the length of the list we can sort
 		   is bounded by pow(2,NTMPSORT)-1. */
 		rr_lent_t *tmp[NTMPSORT];  /* tmp[i] will either be NULL or point to a sorted list of length pow(2,i). */
 		rr_lent_t **fill= tmp, **end=tmp+NTMPSORT, **counter;
-		rr_lent_t *rem= rrset_l, *carry;
+		rr_lent_t *rem, *carry;
 
+		rr_l.prev->links.next=NULL;  /* Make the list temporarily NULL terminated. */
+		rem= rr_l.next;
 		do {
-			carry=rem; rem=rem->next;
-			carry->next=NULL;
+			carry=rem; rem=rem->links.next;
+			carry->links.next=NULL;
 			for(counter = tmp; counter!=fill && *counter!=NULL; ++counter) {
 				carry=listmerge(*counter,carry);
 				*counter=NULL;
@@ -1043,14 +1156,24 @@ static void sort_rrl()
 		while(++counter!=fill)
 			carry=listmerge(*counter,carry);
 
-		rrset_l= carry;
+		rr_l.next= carry;
 
 		{
 			/* Restore the backward links. */
-			rr_lent_t *p,*q=NULL;
-			for(p=rrset_l; p; p=p->next) {p->prev=q; q=p;}
-			rrset_l_tail=q;
+			rr_lent_t *p,*q=NIL_L;
+			for(p=rr_l.next; p; p=p->links.next) {p->links.prev=q; q=p;}
+			/* Make the list circular again. */
+			q->links.next=NIL_L;
+			rr_l.prev=q;
 		}
+		/* It is very unlikely there will be any records with the CF_NOCACHE flag
+		   set when we call sort_rrl(). In fact it will be impossible if
+		   read_disk_cache() is called before any server threads are started
+		   because write_disk_cache() purges these records before saving the cache
+		   to file.  And if there happen to be some it is not a critical failure
+		   to set last_nocache as if there are none.
+		*/
+		last_nocache=NIL_L;
 	}
 }
 
@@ -1068,12 +1191,15 @@ inline static rr_bucket_t *copy_rr(rr_bucket_t *rr  DBGPARAM)
 }
 
 
-/* Copy an RR set into newly allocated memory */
-static rr_set_t *copy_rrset(rr_set_t *rrset  DBGPARAM)
+/* Copy an RR set into newly allocated memory.
+   If szp is not NULL, it is used to return the size of the copied RR set. */
+static rr_set_t *copy_rrset(rr_set_t *rrset, size_t *szp  DBGPARAM)
 {
 	rr_set_t *rrsc=cache_malloc(sizeof(rr_set_t));
 	rr_bucket_t *rr,**rrp;
+	size_t sz=0;
 	if (rrsc) {
+		sz= sizeof(rr_set_t);
 		*rrsc=*rrset;
 		rrsc->lent=NULL;
 		rrp=&rrsc->rrs;
@@ -1081,29 +1207,33 @@ static rr_set_t *copy_rrset(rr_set_t *rrset  DBGPARAM)
 		while(rr) {
 			rr_bucket_t *rrc=copy_rr(rr  DBGARG);
 			*rrp=rrc;
-			if (!rrc) goto cleanup_return;
+			if (!rrc) {
+				del_rrset(rrsc  DBG0);
+				rrsc=NULL;
+				sz=0;
+				break;
+			}
+			sz += sizeof(rr_bucket_t)+rr->rdlen;
 			rrp=&rrc->next;
 			rr=rr->next;
 		}
 	}
+	if(szp) *szp=sz;
 	return rrsc;
-
-cleanup_return:
-	del_rrset(rrsc  DBG0);
-	return NULL;
 }
 
 
-/* Copy a cache entry into newly allocated memory */
-dns_cent_t *copy_cent(dns_cent_t *cent  DBGPARAM)
+/* Copy a cache entry.
+   If the pointer 'copy' is NULL, memory will be allocated to hold the dns_cent_t struct
+   of the copy. */
+static dns_cent_t *copy_cent(dns_cent_t *cent, dns_cent_t *copy  DBGPARAM)
 {
-	dns_cent_t *copy;
-
+	dns_cent_t *new=NULL;
 	/*
 	 * We do not debug cache internals with it, as mallocs seem to be
 	 * "lost" when they enter the cache for a longer time.
 	 */
-	if (!(copy=cache_malloc(sizeof(dns_cent_t))))
+	if (!copy && !(copy=new=cache_malloc(sizeof(dns_cent_t))))
 		return NULL;
 
 	{
@@ -1168,8 +1298,38 @@ dns_cent_t *copy_cent(dns_cent_t *cent  DBGPARAM)
  free_cent_return_null:
 	free_cent(copy  DBGARG);
  free_return_null:
-	cache_free(copy);
+	cache_free(new);
 	return NULL;
+}
+
+/* Move the data from one dns_cent_t to another.
+   The RR sets are not copied like in copy_cent(), but removed from the source dns_cent_t.
+   If the pointer 'dest' is NULL, memory will be allocated to hold the dns_cent_t struct
+   of the result. */
+static dns_cent_t *move_cent(dns_cent_t *cent, dns_cent_t *dest  DBGPARAM)
+{
+	if (!dest && !(dest=cache_malloc(sizeof(dns_cent_t))))
+		return NULL;
+
+	*dest= *cent;
+
+	/* Set various pointers in the source and destination to NULL,
+	   so that it is safe to call free_cent() on both. */
+
+	cent->qname=NULL;
+	if(cent->flags&DF_NEGATIVE) {
+		dest->neg.lent=NULL;
+	}
+	else {
+		int i;
+		for (i=0; i<NRRMU; ++i)
+			cent->rr.rrmu[i]=NULL;
+		cent->rr.rrext=NULL;
+	}
+	cent->cs = sizeof(dns_cent_t);
+	cent->num_rrs = 0;
+
+	return dest;
 }
 
 /*
@@ -1188,7 +1348,9 @@ dns_cent_t *copy_cent(dns_cent_t *cent  DBGPARAM)
 static int purge_rrset(dns_cent_t *cent, int idx, int test)
 {
 	rr_set_t *rrs= RRARR_INDEX_TESTEXT(cent,idx);
-	if (rrs && !(rrs->flags&CF_NOPURGE || rrs->flags&CF_LOCAL) && timedout(rrs)) {
+	if (rrs && ((rrs->flags&CF_NOCACHE) || !(rrs->flags&CF_NOPURGE)) &&
+	    !(rrs->flags&CF_LOCAL) && timedout(rrs))
+	{
 		/* well, it must go. */
 		if(!test)
 			cache_size -= del_cent_rrset_by_index(cent,idx  DBG0);
@@ -1213,7 +1375,9 @@ static int purge_all_rrsets(dns_cent_t *cent, int test, int *numrrsrem)
 		for(i=0; i<ilim; ++i) {
 			rr_set_t *rrs= RRARR_INDEX(cent,i);
 			if (rrs) {
-				if(!(rrs->flags&CF_NOPURGE || rrs->flags&CF_LOCAL) && timedout(rrs)) {
+				if(((rrs->flags&CF_NOCACHE) || !(rrs->flags&CF_NOPURGE)) &&
+				   !(rrs->flags&CF_LOCAL) && timedout(rrs))
+				{
 					/* well, it must go. */
 					if(!test)
 						cache_size -= del_cent_rrset_by_index(cent, i  DBG0);
@@ -1308,7 +1472,7 @@ static int purge_cent(dns_cent_t *cent, int delete, int test)
 
 /*
  * Bring cache to a size below or equal the cache size limit (sz). There are two strategies:
- * - for cached sets with CF_NOPURGE not set: delete if timed out
+ * - for cached sets with CF_NOCACHE set or CF_NOPURGE not set: delete if timed out
  * - additional: delete oldest sets.
  */
 static void purge_cache(long sz, int lazy)
@@ -1319,20 +1483,26 @@ static void purge_cache(long sz, int lazy)
 	 * records.
 	 * XXX: We walk the list a second time if this did not free up enough space - this
 	 * should be done better. */
-	le=rrset_l;
-	while (le && (!lazy || cache_size>sz)) {
+	le=rr_l.next;
+	while (le!=NIL_L && (!lazy || cache_size>sz)) {
 		/* Note by Paul Rombouts:
-		 * If data integrity is ensured, at most one node is removed from the rrset_l
+		 * If data integrity is ensured, at most one node is removed from the rr_l list
 		 * per iteration, and this node is the one referenced by le. */
-		rr_lent_t *next=le->next;
-		if (!((le->rrset && (le->rrset->flags&CF_LOCAL)) ||
+		rr_lent_t *next=le->links.next;
+		rr_set_t *rrset=le->rrset;
+		if (!((rrset && (rrset->flags&CF_LOCAL)) ||
 		      (le->cent->flags&DF_LOCAL))) {
 			dns_cent_t *ce = le->cent;
-			if (le->rrset)
-				purge_rrset(ce, le->idx,0);
+			if (rrset) {
+				if(!lazy && (rrset->flags&CF_NOCACHE))
+					cache_size -= del_cent_rrset_by_index(ce, le->idx  DBG0);
+				else
+					purge_rrset(ce, le->idx, 0);
+			}
 			/* Side effect: if purge_rrset called del_cent_rrset then le has been freed.
 			 * ce, however, is still guaranteed to be valid. */
 			if (ce->num_rrs==0 && (!(ce->flags&DF_NEGATIVE) ||
+					       (!lazy && (ce->flags&DF_NOCACHE)) ||
 					       (!(ce->flags&DF_LOCAL) && timedout_nxdom(ce))))
 				del_cache_ent(ce,NULL);
 		}
@@ -1349,13 +1519,14 @@ static void purge_cache(long sz, int lazy)
 		insert_sort=1; /* use insertion sort from now on */
 	}
 
-	le=rrset_l;
-	while (le && cache_size>sz) {
-		rr_lent_t *next=le->next;
-		if (!((le->rrset && (le->rrset->flags&CF_LOCAL)) ||
+	le=rr_l.next;
+	while (le!=NIL_L && cache_size>sz) {
+		rr_lent_t *next=le->links.next;
+		rr_set_t *rrset=le->rrset;
+		if (!((rrset && (rrset->flags&CF_LOCAL)) ||
 		      (le->cent->flags&DF_LOCAL))) {
 			dns_cent_t *ce = le->cent;
-			if (le->rrset)
+			if (rrset)
 				cache_size -= del_cent_rrset_by_index(ce, le->idx  DBG0);
 			/* this will also delete negative cache entries */
 			if (ce->num_rrs==0)
@@ -1508,7 +1679,7 @@ void read_disk_cache()
 				}
 			}
 		}
-		add_cache(&ce);
+		move_to_cache(&ce);
 		free_cent(&ce  DBG0);
 	}
 #ifdef DEBUG_HASH
@@ -1817,7 +1988,7 @@ static int cr_check_add(dns_cent_t *cent, int idx, time_t ttl, time_t ts, unsign
 inline static void adjust_ttl(rr_set_t *rrset)
 {
 	if (rrset->flags&CF_NOCACHE) {
-		rrset->flags &= ~CF_NOCACHE;
+		/* rrset->flags &= ~CF_NOCACHE; */
 		rrset->ttl=0;
 	}
 	else {
@@ -1840,7 +2011,7 @@ inline static void adjust_ttl(rr_set_t *rrset)
 inline static void adjust_dom_ttl(dns_cent_t *cent)
 {
 	if (cent->flags&DF_NOCACHE) {
-		cent->flags &= ~DF_NOCACHE;
+		/* cent->flags &= ~DF_NOCACHE; */
 		cent->neg.ttl=0;
 	}
 	else {
@@ -1862,7 +2033,7 @@ inline static void adjust_dom_ttl(dns_cent_t *cent)
  * limits, and add the entries to the hashes.
  * As memory is already reserved for the rrs, we only need to wrap up the dns_cent_t and
  * alloc memory for it.
- * New entries are appended, so we easiliy know the oldest for purging. For fast acces,
+ * New entries are appended, so we easiliy know the oldest for purging. For fast access,
  * we use hashes instead of ordered storage.
  *
  * This does not free the argument, and it uses a copy of it, so the caller must do free_cent()
@@ -1870,8 +2041,12 @@ inline static void adjust_dom_ttl(dns_cent_t *cent)
  *
  * The new entries rr sets replace the old ones, i.e. old rr sets with the same key are deleted
  * before the new ones are added.
+ *
+ * If the 'merge' argument is postive, the 'cent' argument will be changed to a copy of the new
+ * cache entry. If 'merge' is negative, the RR sets will be moved from the source to the new
+ * cache entry instead of copied. If 'merge' is zero the 'cent' argument will not be modified.
  */
-void add_cache(dns_cent_t *cent)
+void merge_cache(dns_cent_t *cent, int merge)
 {
 	dns_cent_t *ce;
 	dns_hash_loc_t loc;
@@ -1887,7 +2062,7 @@ void add_cache(dns_cent_t *cent)
 		if(cent->num_rrs==0 && !(cent->flags&DF_NEGATIVE))
 			goto purge_cache_return;
 
-		if(!(ce=copy_cent(cent  DBG0)))
+		if(!(ce= (merge<0? move_cent(cent, NULL  DBG0): copy_cent(cent, NULL  DBG0))))
 			goto warn_unlock_cache_return;
 
 		if(!(ce->flags&DF_NEGATIVE)) {
@@ -1899,6 +2074,15 @@ void add_cache(dns_cent_t *cent)
 					adjust_ttl(rrset);
 					if (!insert_rrl(rrset,ce,i))
 						goto free_cent_unlock_cache_return;
+				}
+			}
+			if(merge>0) {
+				/* Repeat some of the modifications with the original,
+				   so that it becomes equal to the entry in the cache. */
+				for (i=0; i<ilim; ++i) {
+					rr_set_t *rrset= RRARR_INDEX(cent,i);
+					if (rrset)
+						adjust_ttl(rrset);
 				}
 			}
 		}
@@ -1945,32 +2129,20 @@ void add_cache(dns_cent_t *cent)
 									    (cerrs->flags&CF_ROOTSERV))) &&
 					!timedout(cerrs)))))
 				{
-					rr_bucket_t *rr,*rtail;
-
 					del_cent_rrset_by_index(ce,i  DBG0);
 
 					if (!cr_check_add(ce, i, centrrs->ttl, centrrs->ts, centrrs->flags))
 						continue;  /* the new record has been deleted as a conflict resolution measure. */
 
-					/* pre-initialize a rrset_t for the case we have a negative cached
-					 * rrset, in which case no further rrs will be added. */
-					if (!add_cent_rrset_by_index(ce, i, centrrs->ttl, centrrs->ts, centrrs->flags  DBG0)) {
+					/* Copy or move the RR set. */
+					if (!(merge<0? add_cent_rrset_move(cent, ce, i  DBG0):
+						       add_cent_rrset_copy(ce, i, centrrs  DBG0)))
 						goto addsize_unlock_cache_return;
-					}
-					rtail=NULL;
-					for (rr=centrrs->rrs; rr; rr=rr->next) {
-						if (!add_cent_rr_int(ce,i,centrrs->ttl, centrrs->ts, centrrs->flags,
-								     rr->rdlen, rr->data, &rtail  DBG0))
-						{
-							/* cleanup this entry */
-							goto cleanup_cent_unlock_cache_return;
-						}
-					}
+
 					cerrs= RRARR_INDEX(ce,i);
 					adjust_ttl(cerrs);
-					if (!insert_rrl(cerrs,ce,i)) {
+					if (!insert_rrl(cerrs,ce,i))
 						goto cleanup_cent_unlock_cache_return;
-					}
 				}
 			}
 		}
@@ -1979,6 +2151,14 @@ void add_cache(dns_cent_t *cent)
 			ce->c_ns=cent->c_ns;
 		if(cent->c_soa!=cundef && (ce->c_soa==cundef || ce->c_soa<cent->c_soa))
 			ce->c_soa=cent->c_soa;
+
+		if(merge>0) {
+			dns_cent_t copy;
+			if(copy_cent(ce, &copy  DBG0)) {
+				free_cent(cent  DBG0);
+				*cent= copy;
+			}
+		}
 	}
 
 	cache_size += ce->cs;
@@ -2025,18 +2205,12 @@ int add_reverse_cache(dns_cent_t * cent)
 					return 0;
 				}
 #ifdef RRMUINDEX_NS
-				ce.rr.rrmu[RRMUINDEX_NS]=cent->rr.rrmu[RRMUINDEX_NS];
+				add_cent_rrset_copy(&ce, RRMUINDEX_NS, cent->rr.rrmu[RRMUINDEX_NS]  DBG0);
 #endif
 #ifdef RRMUINDEX_SOA
-				ce.rr.rrmu[RRMUINDEX_SOA]=cent->rr.rrmu[RRMUINDEX_SOA];
+				add_cent_rrset_copy(&ce, RRMUINDEX_SOA, cent->rr.rrmu[RRMUINDEX_SOA]  DBG0);
 #endif
-				add_cache(&ce);
-#ifdef RRMUINDEX_NS
-				ce.rr.rrmu[RRMUINDEX_NS]=NULL;
-#endif
-#ifdef RRMUINDEX_SOA
-				ce.rr.rrmu[RRMUINDEX_SOA]=NULL;
-#endif
+				move_to_cache(&ce);
 				free_cent(&ce  DBG0);
 			}
 		}
@@ -2224,7 +2398,7 @@ dns_cent_t *lookup_cache(const unsigned char *name, int *wild)
 	}
 	if (ret) {
 		if(!(purge=purge_cent(ret, 1,1))) /* test only, don't remove anything yet! */
-			ret=copy_cent(ret  DBG1);
+			ret=copy_cent(ret, NULL  DBG1);
 	}
 	unlock_cache_r();
 
@@ -2265,7 +2439,7 @@ dns_cent_t *lookup_cache(const unsigned char *name, int *wild)
 			if(purge_cent(ret, 1,0)<0)
 				ret=NULL;
 			else
-				ret=copy_cent(ret  DBG1);
+				ret=copy_cent(ret, NULL  DBG1);
 		}
 		unlock_cache_rw();
 	}
@@ -2289,7 +2463,7 @@ rr_set_t *lookup_cache_local_rrset(const unsigned char *name, int type)
 	if(cent) {
 		rr_set_t *rrset=getrrset(cent,type);
 		if(rrset && (rrset->flags&CF_LOCAL)) {
-			ret= copy_rrset(rrset);
+			ret= copy_rrset(rrset, NULL  DBG0);
 		}
 	}
 	unlock_cache_r();

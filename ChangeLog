@@ -1,3 +1,34 @@
+2012-05-07  Paul A. Rombouts  <p.a.rombouts@home.nl>
+
+	* src/conff.c, src/conff.h, src/conf-parser.c, src/conf-keywords.h,
+	  src/dns_query.c
+	Added a new global configuration option: weak_cache.
+	This option can be assigned a list of RR types that will have the
+	CF_NOCACHE flag set when they are cached, and thus their cache entries
+	will only be short-lived.
+
+2012-05-06  Paul A. Rombouts  <p.a.rombouts@home.nl>
+
+	* src/cache.c, src/cache.h
+	Make records with the CF_NOCACHE flag set much more likely to be purged
+	by placing them in front of all the other records in the rr_l purge
+	list.  The CF_NOCACHE flag is now actually stored in the cache and can
+	overrule CF_NOPURGE.  Records with the CF_NOCACHE flag set will not be
+	saved to disk.
+
+2012-05-04  Paul A. Rombouts  <p.a.rombouts@home.nl>
+
+	* src/cache.c, src/cache.h, src/dns_query.c
+	Eliminate some unnecessary copying of data when adding stuff to the
+	cache with add_cache() (which is now called merge_cache()).
+
+2012-05-03  Paul A. Rombouts  <p.a.rombouts@home.nl>
+
+	* src/cache.c
+	Make the rrset list used for purging circular with a sentinel node
+	instead of NULL terminated. This makes insertion and deletion of nodes
+	simpler and more efficient.
+
 2012-04-23  Paul A. Rombouts  <p.a.rombouts@home.nl>
 
 	* src/dns_query.c

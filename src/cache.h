@@ -83,27 +83,25 @@ typedef struct {
 /*
  * the flag values for RR sets in the cache
  */
-#define CF_NEGATIVE    1       /* this one is for per-RRset negative caching*/
+#define CF_NEGATIVE    1       /* this one is for per-RRset negative caching. */
 #define CF_LOCAL       2       /* Local zone entry */
 #define CF_AUTH        4       /* authoritative record */
-#define CF_NOCACHE     8       /* Only hold for the cache latency time period, then purge.
-				* Not really written to cache, but used by add_cache. */
-#define CF_ADDITIONAL 16       /* This was fetched as an additional or "off-topic" record. */
-#define CF_NOPURGE    32       /* Do not purge this record */
-#define CF_ROOTSERV   64       /* This record was directly obtained from a root server */
+#define CF_NOCACHE     8       /* Only hold for the cache latency time period, then purge. */
+#define CF_NOPURGE    16       /* Do not purge this record (can be overruled by CF_NOCACHE). */
+#define CF_ADDITIONAL 32       /* This was fetched as an additional or "off-topic" record. */
+#define CF_ROOTSERV   64       /* This record was directly obtained from a root server. */
 
 #define CFF_NOINHERIT (CF_LOCAL|CF_AUTH|CF_ADDITIONAL|CF_ROOTSERV) /* not to be inherited on requery */
 
 /*
  * the flag values for whole domains in the cache
  */
-#define DF_NEGATIVE    1       /* this one is for whole-domain negative caching (created on NXDOMAIN)*/
+#define DF_NEGATIVE    1       /* this one is for whole-domain negative caching (created on NXDOMAIN). */
 #define DF_LOCAL       2       /* local record (in conj. with DF_NEGATIVE) */
 #define DF_AUTH        4       /* authoritative record */
 #define DF_NOCACHE     8       /* Only hold for the cache latency time period, then purge.
-				* Only used for negatively cached domains.
-				* Not really written to cache, but used by add_cache. */
-#define DF_WILD       16       /* subdomains of this domain have wildcard records */
+				* Only used for negatively cached domains. */
+#define DF_WILD       16       /* subdomains of this domain have wildcard records. */
 
 /* #define DFF_NOINHERIT (DF_NEGATIVE) */ /* not to be inherited on requery */
 
@@ -168,9 +166,12 @@ int report_cache_stat(int f);
 int dump_cache(int fd, const unsigned char *name, int exact);
 
 /*
- *  add_cache expects the dns_cent_t to be filled.
+ *  add_cache is a variant of merge_cache that does not modify its argument.
+ *  move_to_cache is a variant of merge_cache that removes the RR sets from the source.
  */
-void add_cache(dns_cent_t *cent);
+#define add_cache(cent) merge_cache(cent,0)
+#define move_to_cache(cent) merge_cache(cent,-1)
+void merge_cache(dns_cent_t *cent, int merge);
 int add_reverse_cache(dns_cent_t * cent);
 void del_cache(const unsigned char *name);
 void invalidate_record(const unsigned char *name);
@@ -199,7 +200,7 @@ inline static unsigned int mk_flag_val(servparm_t *server)
 int init_cent(dns_cent_t *cent, const unsigned char *qname, time_t ttl, time_t ts, unsigned flags  DBGPARAM);
 int add_cent_rrset_by_type(dns_cent_t *cent,  int type, time_t ttl, time_t ts, unsigned flags  DBGPARAM);
 int add_cent_rr(dns_cent_t *cent, int type, time_t ttl, time_t ts, unsigned flags,unsigned dlen, void *data  DBGPARAM);
-int del_rrset(rr_set_t *rrs  DBGPARAM);
+unsigned int del_rrset(rr_set_t *rrs  DBGPARAM);
 void free_cent(dns_cent_t *cent  DBGPARAM);
 void free_cent0(void *ptr);
 void negate_cent(dns_cent_t *cent, time_t ttl, time_t ts);
@@ -208,8 +209,6 @@ void del_cent(dns_cent_t *cent);
 /* Because this is empty by now, it is defined as an empty macro to save overhead.*/
 /*void free_rr(rr_bucket_t cent);*/
 #define free_rr(x)
-
-dns_cent_t *copy_cent(dns_cent_t *cent  DBGPARAM);
 
 #if 0
 unsigned long get_serial(void);
@@ -279,6 +278,7 @@ inline static int have_rr(dns_cent_t *cent, int type)
 
 /* Some quick and dirty and hopefully fast macros. */
 #define PDNSD_NOT_CACHED_TYPE(type) ((type)<T_MIN || (type)>T_MAX || rrlkuptab[(type)-T_MIN]>=NRRTOT)
+#define ARRAY_INDEX_BY_TYPE_UNCHECKED(array,type) ((array)[rrlkuptab[(type)-T_MIN]])
 
 /* This is useful for iterating over all the RR types in a cache entry in strict ascending order. */
 #define NRRITERLIST(cent) ((cent)->flags&DF_NEGATIVE?0:(cent)->rr.rrext?NRRTOT:NRRMU)

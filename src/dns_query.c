@@ -187,6 +187,11 @@ static int rr_to_cache(dns_cent_array *centa, unsigned char *oname, int tp, time
 	int i,n;
 	dns_cent_t *cent;
 
+	/* Note: unchecked array access. We are relying on the caller to check
+	   that tp represents a cache-able RR type. */
+	if(ARRAY_INDEX_BY_TYPE_UNCHECKED(global.weak_cache,tp))
+		flags |= CF_NOCACHE;
+
 	n=DA_NEL(*centa);
 	for(i=0;i<n;++i) {
 		cent=&DA_INDEX(*centa,i);
@@ -1874,7 +1879,7 @@ static int p_exec_query(dns_cent_t **entp, const unsigned char *name, int thint,
 					if(*(cent->qname) || st->auth_serv!=2) {
 						unsigned int rem;
 						if(st->trusted || !st->nsdomain || (domain_match(st->nsdomain, cent->qname, &rem, NULL),rem==0))
-							add_cache(cent);
+							move_to_cache(cent);
 						else {
 #if DEBUG>0
 							unsigned char nmbuf[DNSNAMEBUFSIZE],nsbuf[DNSNAMEBUFSIZE];
@@ -3292,17 +3297,9 @@ static int p_dns_resolve(const unsigned char *name, int thint, dns_cent_t **cach
 		rc=p_recursive_query(serv, name, thint, &cached, &nocache, hops, NULL, qhlist, c_soa);
 		if (rc==RC_OK) {
 			if (!nocache) {
-				dns_cent_t *tc;
-				add_cache(cached);
-				if ((tc=lookup_cache(name,NULL))) {
-					/* The cache may hold more information  than the recent query yielded.
-					 * try to get the merged record. If that fails, revert to the new one. */
-					free_cent(cached  DBG1);
-					pdnsd_free(cached);
-					cached=tc;
-					/* rc=RC_CACHED; */
-				} else
-					DEBUG_MSG("p_dns_resolve: merging answer with cache failed, using local cent copy.\n");
+				/* Add the query result to the cache, but try to get a merged record,
+				   because the cache may hold more information than the recent query yielded. */
+				merge_cache(cached, 1);
 			} else
 				DEBUG_MSG("p_dns_resolve: nocache.\n");
 
@@ -3614,16 +3611,9 @@ static int simple_dns_cached_resolve(atup_array atup_a, int port, char edns_quer
 		rc=p_recursive_query(qserv,name,thint, &cached,NULL,0,NULL,NULL,NULL);
 		del_qserv(qserv);
 		if (rc==RC_OK) {
-			dns_cent_t *tc;
-			add_cache(cached);
-			if ((tc=lookup_cache(name,NULL))) {
-				/* The cache may hold more information  than the recent query yielded.
-				 * try to get the merged record. If that fails, revert to the new one. */
-				free_cent(cached  DBG1);
-				pdnsd_free(cached);
-				cached=tc;
-			} else
-				DEBUG_MSG("simple_dns_cached_resolve: merging answer with cache failed, using local cent copy.\n");
+			/* Add the query result to the cache, but try to get a merged record,
+			   because the cache may hold more information than the recent query yielded. */
+			merge_cache(cached, 1);
 		}
 		else if(!(rc==RC_CACHED || rc==RC_STALE))  /* RC_CACHED and RC_STALE should not be possible. */
 			return rc;
